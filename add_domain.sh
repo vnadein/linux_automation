@@ -40,10 +40,10 @@ if [ ! -f "$SITE_PATH/index.html" ]; then
   cat > "$SITE_PATH/index.html" <<EOF
 <!DOCTYPE html>
 <html>
-<head><title>Добро пожаловать на $DOMAIN</title></head>
+<head><title>Welcome to $DOMAIN</title></head>
 <body>
-<h1>✅ Сайт $DOMAIN работает!</h1>
-<p>Вы подключены по <strong>HTTPS</strong>.</p>
+<h1>✅ Youe $DOMAIN is working!</h1>
+<p>You connection by <strong>HTTPS</strong>.</p>
 </body>
 </html>
 EOF
