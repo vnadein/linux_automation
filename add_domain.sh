@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# === УНИВЕРСАЛЬНЫЙ СКРИПТ ДОБАВЛЕНИЯ САЙТА ===
+# Поддерживает: Ubuntu, Debian, Fedora, RHEL, CentOS, AlmaLinux, Rocky Linux
+
 # Проверка аргументов
 if [ "$#" -ne 2 ]; then
   echo "Использование: $0 <домен> <путь_к_сайту>"
@@ -16,49 +19,111 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
-# Проверка наличия Apache и Certbot
-if ! command -v apache2 &> /dev/null; then
-  echo "❌ Apache не установлен. Установите: apt install apache2"
-  exit 1
-fi
+# === ОПРЕДЕЛЕНИЕ СИСТЕМЫ ===
+detect_os() {
+  if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    OS=$ID
+    VER=$VERSION_ID
+  else
+    echo "❌ Не удалось определить ОС"
+    exit 1
+  fi
 
-if ! command -v certbot &> /dev/null; then
-  echo "❌ Certbot не установлен. Установите: apt install certbot python3-certbot-apache"
-  exit 1
-fi
+  case $OS in
+    ubuntu|debian|linuxmint|raspbian)
+      OS_FAMILY="debian"
+      PKG_MANAGER="apt"
+      APACHE_SERVICE="apache2"
+      APACHE_USER="www-data"
+      APACHE_CONF_DIR="/etc/apache2/sites-available"
+      APACHE_CONF_ENABLED="/etc/apache2/sites-enabled"
+      APACHE_CONF_EXT=".conf"
+      LOG_DIR="/var/log/apache2"
+      DIG_PACKAGE="dnsutils"
+      ;;
+    
+    fedora|rhel|centos|rocky|almalinux)
+      OS_FAMILY="redhat"
+      PKG_MANAGER="dnf"
+      APACHE_SERVICE="httpd"
+      APACHE_USER="apache"
+      APACHE_CONF_DIR="/etc/httpd/conf.d"
+      APACHE_CONF_ENABLED="$APACHE_CONF_DIR" # В conf.d все файлы автоматически включены
+      APACHE_CONF_EXT=".conf"
+      LOG_DIR="/var/log/httpd"
+      DIG_PACKAGE="bind-utils"
+      ;;
+    
+    *)
+      echo "❌ Неподдерживаемая ОС: $OS"
+      exit 1
+      ;;
+  esac
 
-# Создание директории сайта
-if [ ! -d "$SITE_PATH" ]; then
-  echo "📁 Создаём директорию: $SITE_PATH"
-  mkdir -p "$SITE_PATH"
-  chown -R www-data:www-data "$SITE_PATH"
-  chmod -R 755 "$SITE_PATH"
-fi
+  echo "✅ Определена система: $OS $VER (семейство: $OS_FAMILY)"
+}
 
-# Создание заглушки index.html (если нет)
-if [ ! -f "$SITE_PATH/index.html" ]; then
-  cat > "$SITE_PATH/index.html" <<EOF
+# === Установка пакетов ===
+install_packages() {
+  case $PKG_MANAGER in
+    apt)
+      apt update -y > /dev/null 2>&1
+      apt install -y "$@" > /dev/null 2>&1
+      ;;
+    dnf)
+      dnf install -y "$@" > /dev/null 2>&1
+      ;;
+  esac
+}
+
+# === Проверка наличия Apache ===
+check_apache() {
+  if ! systemctl is-active --quiet $APACHE_SERVICE; then
+    echo "❌ Apache ($APACHE_SERVICE) не запущен!"
+    exit 1
+  fi
+}
+
+# === Основная логика ===
+main() {
+  detect_os
+  check_apache
+
+  # Создание директории сайта
+  if [ ! -d "$SITE_PATH" ]; then
+    echo "📁 Создаём директорию: $SITE_PATH"
+    mkdir -p "$SITE_PATH"
+    chown -R $APACHE_USER:$APACHE_USER "$SITE_PATH"
+    chmod -R 755 "$SITE_PATH"
+  fi
+
+  # Создание заглушки index.html (если нет)
+  if [ ! -f "$SITE_PATH/index.html" ]; then
+    cat > "$SITE_PATH/index.html" <<EOF
 <!DOCTYPE html>
 <html>
 <head><title>Welcome to $DOMAIN</title></head>
 <body>
-<h1>✅ Youe $DOMAIN is working!</h1>
-<p>You connection by <strong>HTTPS</strong>.</p>
+<h1>✅ Your $DOMAIN is working!</h1>
+<p>You are connected by <strong>HTTPS</strong>.</p>
+<p>Server: $(hostname)</p>
+<p>OS: $OS $VER</p>
 </body>
 </html>
 EOF
-fi
+    chown $APACHE_USER:$APACHE_USER "$SITE_PATH/index.html"
+  fi
 
-# Имя конфигурации
-CONF_NAME="${DOMAIN}.conf"
-HTTP_CONF="/etc/apache2/sites-available/${CONF_NAME}"
+  # Имя конфигурации
+  CONF_NAME="${DOMAIN}${APACHE_CONF_EXT}"
+  HTTP_CONF="${APACHE_CONF_DIR}/${CONF_NAME}"
 
-# Создание HTTP-виртуального хоста (только для основного домена)
-if [ ! -f "$HTTP_CONF" ]; then
-  cat > "$HTTP_CONF" <<EOF
+  # Создание HTTP-виртуального хоста
+  if [ ! -f "$HTTP_CONF" ]; then
+    cat > "$HTTP_CONF" <<EOF
 <VirtualHost *:80>
     ServerName $DOMAIN
-    # Перехватываем www и перенаправляем на основной домен
     ServerAlias www.$DOMAIN
 
     DocumentRoot $SITE_PATH
@@ -76,58 +141,93 @@ if [ ! -f "$HTTP_CONF" ]; then
     RewriteCond %{HTTPS} off
     RewriteRule ^(.*)$ https://$DOMAIN%{REQUEST_URI} [R=301,L]
 
-    ErrorLog \${APACHE_LOG_DIR}/$DOMAIN_error.log
-    CustomLog \${APACHE_LOG_DIR}/$DOMAIN_access.log combined
+    ErrorLog ${LOG_DIR}/${DOMAIN}_error.log
+    CustomLog ${LOG_DIR}/${DOMAIN}_access.log combined
 </VirtualHost>
 EOF
 
-  echo "📄 Создан HTTP-конфиг: $HTTP_CONF"
-else
-  echo "⚠️  Конфиг для $DOMAIN уже существует. Используем существующий."
-fi
+    echo "📄 Создан HTTP-конфиг: $HTTP_CONF"
 
-# Включаем сайт
-a2ensite "$CONF_NAME" > /dev/null 2>&1
-systemctl reload apache2
+    # Для Debian/Ubuntu нужно включить сайт
+    if [ "$OS_FAMILY" = "debian" ]; then
+      a2ensite "$CONF_NAME" > /dev/null 2>&1
+      echo "   Сайт включён (a2ensite)"
+    fi
+  else
+    echo "⚠️  Конфиг для $DOMAIN уже существует. Используем существующий."
+  fi
 
-# Проверка DNS (для информации)
-SERVER_IP=$(hostname -I | awk '{print $1}')
-DOMAIN_IP=$(dig +short "$DOMAIN" A | head -n1)
+  # Включаем модуль rewrite если нужно
+  if [ "$OS_FAMILY" = "debian" ]; then
+    a2enmod rewrite > /dev/null 2>&1
+  fi
 
-if [ -z "$DOMAIN_IP" ]; then
-  echo "⚠️  Не удалось разрешить A-запись для $DOMAIN. Это может помешать выпуску сертификата."
-elif [ "$DOMAIN_IP" != "$SERVER_IP" ]; then
-  echo "⚠️  DNS $DOMAIN указывает на $DOMAIN_IP, но сервер — $SERVER_IP. Проверьте A-запись!"
-fi
+  # Перезагружаем Apache
+  systemctl reload $APACHE_SERVICE
 
-# Запрос сертификата ТОЛЬКО для основного домена (без www)
-echo "🔐 Запрашиваем SSL-сертификат ТОЛЬКО для: $DOMAIN"
+  # Установка dig если нужно
+  if ! command -v dig &> /dev/null; then
+    echo "📦 Устанавливаем dig..."
+    install_packages $DIG_PACKAGE
+  fi
 
-EMAIL="admin@$DOMAIN"
+  # Проверка DNS
+  SERVER_IP=$(hostname -I | awk '{print $1}')
+  DOMAIN_IP=$(dig +short "$DOMAIN" A | head -n1)
 
-if certbot --apache \
-           --non-interactive \
-           --agree-tos \
-           --email "$EMAIL" \
-           --domains "$DOMAIN" \
-           --redirect; then
-  echo "✅ SSL-сертификат успешно выпущен для $DOMAIN"
-else
-  echo "❌ Не удалось выпустить сертификат. Проверьте:"
-  echo "   - Доступность порта 80 из интернета"
-  echo "   - Корректность DNS A-записи"
-  exit 1
-fi
+  if [ -z "$DOMAIN_IP" ]; then
+    echo "⚠️  Не удалось разрешить A-запись для $DOMAIN"
+  elif [ "$DOMAIN_IP" != "$SERVER_IP" ]; then
+    echo "⚠️  DNS $DOMAIN → $DOMAIN_IP, сервер → $SERVER_IP"
+  else
+    echo "✅ DNS корректен"
+  fi
 
-# Certbot сам перезагружает Apache, но на всякий случай:
-systemctl reload apache2
+  # Настройка firewall
+  if command -v ufw &> /dev/null; then
+    ufw allow 80/tcp > /dev/null 2>&1
+    ufw allow 443/tcp > /dev/null 2>&1
+    echo "🔥 UFW настроен"
+  elif command -v firewall-cmd &> /dev/null; then
+    firewall-cmd --permanent --add-service=http > /dev/null 2>&1
+    firewall-cmd --permanent --add-service=https > /dev/null 2>&1
+    firewall-cmd --reload > /dev/null 2>&1
+    echo "🔥 Firewalld настроен"
+  fi
 
-echo ""
-echo "✅ Настройка завершена!"
-echo "   Основной URL: https://$DOMAIN"
-echo "   www.$DOMAIN → автоматически перенаправляется на https://$DOMAIN"
-echo "   Папка сайта: $SITE_PATH"
-echo ""
-echo "💡 Советы:"
-echo "   - Все HTTP → HTTPS (с редиректом без www)"
-echo "   - Сертификат обновляется автоматически (certbot renew)"
+  # Запрос SSL-сертификата
+  echo "🔐 Запрашиваем SSL-сертификат для: $DOMAIN"
+
+  EMAIL="admin@$DOMAIN"
+
+  if certbot --$APACHE_SERVICE \
+             --non-interactive \
+             --agree-tos \
+             --email "$EMAIL" \
+             --domains "$DOMAIN" \
+             --redirect; then
+    echo "✅ SSL-сертификат успешно выпущен"
+  else
+    echo "❌ Не удалось выпустить сертификат"
+    echo "   Проверьте: порт 80 доступен, DNS настроен"
+    exit 1
+  fi
+
+  systemctl reload $APACHE_SERVICE
+
+  # Финальный вывод
+  echo ""
+  echo "✅ Настройка завершена!"
+  echo "────────────────────────────────────"
+  echo "Домен: $DOMAIN"
+  echo "URL: https://$DOMAIN"
+  echo "www.$DOMAIN → https://$DOMAIN"
+  echo "Папка сайта: $SITE_PATH"
+  echo "Система: $OS $VER"
+  echo "────────────────────────────────────"
+  echo "💡 Проверка: curl -I https://$DOMAIN"
+  echo "   Логи: $LOG_DIR/${DOMAIN}_*.log"
+}
+
+# Запуск
+main
