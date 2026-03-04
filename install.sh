@@ -1,7 +1,8 @@
 #!/bin/bash
 
-# === УНИВЕРСАЛЬНЫЙ СКРИПТ УСТАНОВКИ ===
+# === УНИВЕРСАЛЬНЫЙ СКРИПТ УСТАНОВКИ (LAMP + phpMyAdmin + Node.js 22 + Certbot) ===
 # Поддерживает: Ubuntu, Debian, Fedora, RHEL, CentOS, AlmaLinux, Rocky Linux
+# ВНИМАНИЕ: устанавливается официальный MySQL вместо MariaDB
 
 # === КОНФИГУРАЦИЯ ===
 YOUR_DOMAIN=""  # ← Укажите ваш домен (например: example.com), если хотите автоматический SSL
@@ -46,6 +47,7 @@ detect_os() {
       NODE_SETUP_CMD="curl -fsSL https://deb.nodesource.com/setup_22.x | bash -"
       NODE_INSTALL_CMD="apt install -y nodejs"
       CERTBOT_PACKAGES="certbot python3-certbot-apache"
+      # MySQL (официальный)
       MYSQL_SERVICE="mysql"
       MYSQL_CLIENT="mysql-client"
       MYSQL_SERVER="mysql-server"
@@ -54,6 +56,7 @@ detect_os() {
       PHPMYADMIN_CONF_DIR="/etc/phpmyadmin"
       PHPMYADMIN_WEB_DIR="/usr/share/phpmyadmin"
       EXTRA_REPOS=""
+      REPO_KEY_URL="https://repo.mysql.com/RPM-GPG-KEY-mysql-2023"
       ;;
     
     fedora|rhel|centos|rocky|almalinux)
@@ -69,14 +72,16 @@ detect_os() {
       NODE_SETUP_CMD="curl -fsSL https://rpm.nodesource.com/setup_22.x | bash -"
       NODE_INSTALL_CMD="dnf install -y nodejs"
       CERTBOT_PACKAGES="certbot python3-certbot-apache"
-      MYSQL_SERVICE="mariadb"
-      MYSQL_CLIENT="mariadb"
-      MYSQL_SERVER="mariadb-server"
-      MYSQL_DEV="mariadb-devel"
+      # MySQL (официальный)
+      MYSQL_SERVICE="mysqld"
+      MYSQL_CLIENT="mysql"
+      MYSQL_SERVER="mysql-server"
+      MYSQL_DEV="mysql-devel"
       PHPMYADMIN_PACKAGE="phpMyAdmin"
       PHPMYADMIN_CONF_DIR="/etc/phpMyAdmin"
       PHPMYADMIN_WEB_DIR="/usr/share/phpMyAdmin"
       EXTRA_REPOS="epel-release"
+      REPO_KEY_URL="https://repo.mysql.com/RPM-GPG-KEY-mysql-2023"
       ;;
     
     *)
@@ -138,9 +143,56 @@ setup_firewall() {
   fi
 }
 
+# === Добавление официального репозитория MySQL ===
+add_mysql_repo() {
+  log "📦 Добавляем официальный репозиторий MySQL..."
+  
+  case $OS_FAMILY in
+    debian)
+      # Устанавливаем необходимые пакеты
+      install_packages wget gnupg2 lsb-release
+      
+      # Скачиваем и устанавливаем пакет конфигурации репозитория
+      MYSQL_APT_CONFIG_DEB="mysql-apt-config_0.8.33-1_all.deb"
+      wget -q "https://dev.mysql.com/get/${MYSQL_APT_CONFIG_DEB}" -O /tmp/${MYSQL_APT_CONFIG_DEB}
+      dpkg -i /tmp/${MYSQL_APT_CONFIG_DEB} 2>&1 | tee -a "$LOG_FILE"
+      rm -f /tmp/${MYSQL_APT_CONFIG_DEB}
+      
+      # Обновляем список пакетов
+      apt update -y
+      ;;
+    
+    redhat)
+      # Определяем основной номер версии
+      MAJOR_VER=$(echo $VER | cut -d. -f1)
+      
+      if [ "$OS" = "fedora" ]; then
+        REPO_RPM="mysql80-community-release-fc${MAJOR_VER}.noarch.rpm"
+      else
+        # Для RHEL/CentOS/Rocky/AlmaLinux используем el+версия
+        REPO_RPM="mysql80-community-release-el${MAJOR_VER}.noarch.rpm"
+      fi
+      
+      # Устанавливаем репозиторий
+      dnf install -y https://dev.mysql.com/get/${REPO_RPM}
+      
+      # Импортируем ключ GPG (на всякий случай)
+      rpm --import ${REPO_KEY_URL} 2>/dev/null || true
+      
+      # Отключаем модуль MariaDB, чтобы избежать конфликтов
+      dnf module disable mariadb -y 2>/dev/null || true
+      
+      # Обновляем кэш
+      dnf makecache
+      ;;
+  esac
+  
+  log "✅ Репозиторий MySQL добавлен"
+}
+
 # === ОСНОВНАЯ УСТАНОВКА ===
 main() {
-  log "🚀 Начало универсальной установки LAMP + phpMyAdmin + Node.js 22 + Certbot"
+  log "🚀 Начало универсальной установки LAMP + phpMyAdmin + Node.js 22 + Certbot (с официальным MySQL)"
   log "Время начала: $(date)"
 
   # Определяем систему
@@ -150,22 +202,25 @@ main() {
   MYSQL_ROOT_PASSWORD=$(generate_password)
   PHPMYADMIN_PASSWORD=$(generate_password)
 
-  log "Сгенерирован пароль MySQL/MariaDB root: $MYSQL_ROOT_PASSWORD"
+  log "Сгенерирован пароль MySQL root: $MYSQL_ROOT_PASSWORD"
   log "Сгенерирован пароль phpMyAdmin DB user: $PHPMYADMIN_PASSWORD"
 
   # Устанавливаем дополнительные репозитории (для RedHat семейства)
   if [ "$OS_FAMILY" = "redhat" ] && [ -n "$EXTRA_REPOS" ]; then
     log "📦 Устанавливаем дополнительные репозитории..."
     install_packages $EXTRA_REPOS
-    
-    # Для Fedora добавляем REMI репозиторий для PHP
-    if [ "$OS" = "fedora" ]; then
-      install_packages https://rpms.remirepo.net/fedora/remi-release-${VER}.rpm
-      dnf config-manager --set-enabled remi
-      dnf module reset php -y
-      dnf module install php:remi-8.3 -y
-    fi
   fi
+
+  # Для Fedora добавляем REMI репозиторий для PHP (опционально, для более новых версий PHP)
+  if [ "$OS" = "fedora" ]; then
+    install_packages https://rpms.remirepo.net/fedora/remi-release-${VER}.rpm
+    dnf config-manager --set-enabled remi
+    dnf module reset php -y
+    dnf module install php:remi-8.3 -y
+  fi
+
+  # Добавляем официальный репозиторий MySQL (для всех систем)
+  add_mysql_repo
 
   # === Установка Apache ===
   log "📦 Устанавливаем Apache ($APACHE_SERVICE)..."
@@ -180,25 +235,20 @@ main() {
 
   start_service $APACHE_SERVICE
 
-  # === Установка MySQL/MariaDB ===
-  log "📦 Устанавливаем базу данных..."
+  # === Установка MySQL (Oracle) ===
+  log "📦 Устанавливаем MySQL сервер и клиент..."
   install_packages $MYSQL_SERVER $MYSQL_CLIENT $MYSQL_DEV
   start_service $MYSQL_SERVICE
 
-  # Настройка пароля root (разные способы для разных БД)
-  if [ "$MYSQL_SERVICE" = "mysql" ]; then
-    # Для MySQL на Debian/Ubuntu
-    mysql <<EOF
+  # Небольшая задержка для полного старта MySQL
+  sleep 5
+
+  # Настройка пароля root (метод ALTER USER работает в MySQL 8)
+  # После установки root обычно не имеет пароля (или доступ через socket)
+  mysql -u root <<EOF
 ALTER USER 'root'@'localhost' IDENTIFIED BY '$MYSQL_ROOT_PASSWORD';
 FLUSH PRIVILEGES;
 EOF
-  else
-    # Для MariaDB на RedHat/Fedora
-    mysql <<EOF
-ALTER USER 'root'@'localhost' IDENTIFIED BY '$MYSQL_ROOT_PASSWORD';
-FLUSH PRIVILEGES;
-EOF
-  fi
 
   # === Установка PHP ===
   log "📦 Устанавливаем PHP и расширения..."
@@ -209,7 +259,7 @@ EOF
   log "📦 Устанавливаем phpMyAdmin..."
   
   if [ "$OS_FAMILY" = "debian" ]; then
-    # Debian/Ubuntu способ
+    # Debian/Ubuntu способ с предварительной настройкой
     echo "phpmyadmin phpmyadmin/reconfigure-webserver multiselect $APACHE_SERVICE" | debconf-set-selections
     echo "phpmyadmin phpmyadmin/dbconfig-install boolean true" | debconf-set-selections
     echo "phpmyadmin phpmyadmin/mysql/admin-user string root" | debconf-set-selections
@@ -344,7 +394,7 @@ EOF
   if [ -n "$YOUR_DOMAIN" ]; then
     log "Домен: $YOUR_DOMAIN"
   fi
-  log "База данных: $MYSQL_SERVICE"
+  log "База данных: MySQL (Oracle)"
   log "Пароль root: $MYSQL_ROOT_PASSWORD"
   log "Пароль phpMyAdmin DB user: $PHPMYADMIN_PASSWORD"
   log "phpMyAdmin URL: http://$SERVER_IP/phpmyadmin"
